@@ -13,16 +13,21 @@ import {
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
-import { ContentManagementService } from '../../../core/service/content-management-service';
-import { MediaPlayerService } from '../../../core/service/media-player.service';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
+import { VideoNotFoundException } from '@src/core/exception/video-not-found.exception';
+import { ContentManagementService } from '@src/core/service/content-management.service';
+import { MediaPlayerService } from '@src/core/service/media-player.service';
+import { CreateVideoResponseDto } from '@src/http/rest/dto/response/create-video-response.dto';
+import { RestResponseInterceptor } from '@src/http/rest/interceptor/rest-response.interceptor';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { randomUUID } from 'crypto';
-import path, { extname } from 'path';
+import { Request, Response } from 'express';
 import fs from 'fs';
-import type { Request, Response } from 'express';
+import { diskStorage } from 'multer';
+import path, { extname } from 'path';
 
-@Controller()
+@Controller('content')
 export class ContentController {
   constructor(
     private readonly contentManagementService: ContentManagementService,
@@ -62,6 +67,7 @@ export class ContentController {
       },
     ),
   )
+  @UseInterceptors(new RestResponseInterceptor(CreateVideoResponseDto))
   async uploadVideo(
     @Req() _req: Request,
     @Body()
@@ -71,7 +77,7 @@ export class ContentController {
     },
     @UploadedFiles()
     files: { video?: Express.Multer.File[]; thumbnail?: Express.Multer.File[] },
-  ): Promise<any> {
+  ): Promise<CreateVideoResponseDto> {
     const videoFile = files.video?.[0];
     const thumbnailFile = files.thumbnail?.[0];
 
@@ -81,7 +87,7 @@ export class ContentController {
       );
     }
 
-    return await this.contentManagementService.createContent({
+    return this.contentManagementService.createContent({
       title: contentData.title,
       description: contentData.description,
       url: videoFile.path,
@@ -89,43 +95,57 @@ export class ContentController {
       sizeInKb: videoFile.size,
     });
   }
+
   @Get('stream/:videoId')
   @Header('Content-Type', 'video/mp4')
   async streamVideo(
     @Param('videoId') videoId: string,
     @Req() req: Request,
     @Res() res: Response,
-  ): Promise<any> {
-    const url = await this.mediaPlayerService.prepareStreaming(videoId);
+  ) {
+    try {
+      const url = await this.mediaPlayerService.prepareStreaming(videoId);
 
-    if (!url) {
-      return res.status(HttpStatus.NOT_FOUND);
+      if (!url) {
+        return res.sendStatus(HttpStatus.NOT_FOUND);
+      }
+      const videoPath = path.join('.', url);
+      const fileSize = fs.statSync(videoPath).size;
+
+      const range = req.headers.range;
+
+      if (range) {
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+        const chunksize = end - start + 1;
+        const file = fs.createReadStream(videoPath, { start, end });
+
+        res.writeHead(HttpStatus.PARTIAL_CONTENT, {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunksize,
+          'Content-Type': 'video/mp4',
+        });
+
+        file.pipe(res);
+      } else {
+        res.writeHead(HttpStatus.OK, {
+          'Content-Length': fileSize,
+          'Content-Type': 'video/mp4',
+        });
+        fs.createReadStream(videoPath).pipe(res);
+      }
+    } catch (error) {
+      if (error instanceof VideoNotFoundException) {
+        return res.status(HttpStatus.NOT_FOUND).send({
+          message: error.message,
+          error: 'Not Found',
+          statusCode: HttpStatus.NOT_FOUND,
+        });
+      }
+      throw error;
     }
-
-    const videoPath = path.join('.', url);
-    const fileSize = fs.statSync(videoPath).size;
-
-    const range = req.headers.range;
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-      const chunksize = end - start + 1;
-      const file = fs.createReadStream(videoPath, { start, end });
-
-      res.writeHead(HttpStatus.PARTIAL_CONTENT, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': 'video/mp4',
-      });
-
-      return file.pipe(res);
-    }
-    res.writeHead(HttpStatus.OK, {
-      'Content-Length': fileSize,
-      'Content-Type': 'video/mp4',
-    });
   }
 }
