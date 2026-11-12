@@ -15,16 +15,14 @@ lerna-debug.log*
 # OS
 .DS_Store
 
+.env
+
 # Tests
 /coverage
 /.nyc_output
 
 #postgres
-/.data
 /data
-
-# uploaded files
-/uploads
 
 # IDEs and editors
 /.idea
